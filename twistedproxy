@@ -1,0 +1,68 @@
+#!/usr/bin/env python
+from twisted.web import proxy, http
+from twisted.internet import reactor, protocol
+import socks5, re, config
+
+sock_re = [re.compile(x) for x in config.SOCKSIFY]
+
+from twisted.python import log
+import sys
+log.startLogging(sys.stdout)
+
+class ProxyClient(proxy.ProxyClient):
+  def close(self):
+    self.father.channel.transport.loseConnection()
+
+class ProxyClientFactory(proxy.ProxyClientFactory):
+  protocol = ProxyClient
+	
+class ProxyRequest(proxy.ProxyRequest):
+  protocols = {'http': ProxyClientFactory}
+
+class Proxy(proxy.Proxy):
+  requestFactory = ProxyRequest
+
+class ProxyFactory(http.HTTPFactory):
+  protocol = Proxy
+
+class ProperInstanceFactory:
+  def __init__(self, instance):
+    self.instance = instance
+
+  def buildProtocol(self, addr):
+    return self.instance
+
+  def clientConnectionFailed(self, *args, **kwargs):
+    self.instance.close()
+
+  def clientConnectionLost(self, *args, **kwargs):
+    self.instance.close()
+
+class ProxyClientCreator(protocol.ClientCreator):
+  def connectSocks5Proxy(self, remotehost, remoteport, proxy, proxyport):
+    f = ProperInstanceFactory(self.protocolClass(*self.args, **self.kwargs))
+    self.reactor.connectWith(socks5.ClientConnector, host=remotehost,port=remoteport, sockshost=proxy,socksport=proxyport, otherFactory=f)
+
+old_connectTCP = reactor.connectTCP
+def newConnectTCP(host, port, factory):
+  for x in sock_re:
+    if x.match(host):
+      break
+  else:
+    return old_connectTCP(host, port, factory)
+
+  p = ProxyClientCreator(reactor, lambda: factory.buildProtocol(1))
+
+  class Wrapper:
+    def __init__(self, *args, **kwargs):
+      pass
+
+    def connect(self):
+      p.connectSocks5Proxy(host, port, config.SOCKS_HOST, config.SOCKS_PORT)
+
+  return reactor.connectWith(Wrapper)
+
+reactor.connectTCP = newConnectTCP
+
+reactor.listenTCP(config.PORT, ProxyFactory(), interface=config.INTERFACE)
+reactor.run()
